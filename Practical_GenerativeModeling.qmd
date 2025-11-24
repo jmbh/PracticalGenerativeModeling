@@ -1,0 +1,305 @@
+---
+title: "Practical: Generative Modeling"
+author: <jonashaslbeck@protonmail.com>
+format:
+  html:
+    self-contained: true
+editor: visual
+---
+
+## Overview
+
+In this tutorial we will study two generative models, one for rumination and one for emotion generation. In each case, we will start with a verbal description of the dynamics, followed by an implementation of those dynamics in a generative model, which allows us to simulate data from the model. We will then model these data with a Vector Autoregressive (VAR) model and discuss to what extend we are recovering the dynamics of the data generating mechanism, or at least to what extent we are arriving at correct conclusions about it.
+
+## Loading Packages
+
+```{r}
+library(MASS)
+library(corpcor)
+library(qgraph)
+source("Files/EstimateVAR.R")
+source("Files/Layout.R")
+
+```
+
+## Model 1: Rumination
+
+### Description of Dynamics
+
+We have an environment in which a person is experiencing events. These events cause either positive or negative affect. Most causal effects of those events on affect are rather small, but a few are stronger. This particular person experiences a few very intense events which are all causing negative affect to go up. The person keeps on thinking about positive and negative events, which makes the affect linger. In the case of negative affect, this effect is particularly strong, and therefore could be called rumination.
+
+### Making the Model
+
+To implement these dynamics we have to make a number of choices:
+
+1.  We will model positive and negative affect as two continuous variables
+2.  We choose time to evolve in discrete steps, because this is easier to understand and makes the implementation for this practical easier
+3.  We model the many small events eliciting positive or negative emotions not explicitly, but implicitly as the impact they have on positive/negative affect. We draw these impacts from a bivariate Gaussian distribution. We assume that if a given event is causing negative affect to go up, then at the same time it *tends* to cause positive affect go down (and vice versa). We therefore draw the impacts events have on positive and negative affect from a bivariate Gaussian with a strong negative correlation.
+4.  We model the strong negative events as deterministic impulses to negative affect at two specific time points (but we could also draw those randomly with a given probability)
+5.  We model the lingering effect of affect with an autoregressive parameter that makes affect at time t depend on affect at time t-1. For positive affect we call this parameter $\phi_{Pos}$, for negative affect we call it $\phi_{Neg}$.
+
+This leads to the following implementation, which simulates a given number of time points $N$ from the model and returns the corresponding measurements of positive and negative affect:
+
+```{r}
+SimMod1 <- function(N, # Number of time points
+                    phi_Pos=0.25,
+                    phi_Neg=0.25,
+                    event_times_neg = c(40, 130)) {
+  # Storage for variables
+  df <- data.frame(matrix(NA, N, 2))
+  colnames(df) <- c("Pos", "Neg")
+  
+  df[1, ] <- c(0,0) # Initial values for positive and negative affect
+  Nevents <- rep(0, N)
+  Nevents[event_times_neg] <- 1 # Strong negative event at time points 40 and 130
+  
+  for(i in 2:N) {
+    # Draw negatively correlated innovations
+    innov_i <- mvrnorm(1, mu = c(0,0), Sigma = matrix(c(1, -0.7, 
+                                                        -0.7, 1), 2,2))
+    # Compute values of Positive and Negative Affect at the next time step
+    df$Pos[i] <- phi_Pos * df$Pos[i-1] + innov_i[1]
+    df$Neg[i] <- phi_Neg * df$Neg[i-1] + innov_i[2] + 10 * Nevents[i] 
+  }
+  
+  return(df)
+  
+} # end of Function
+
+```
+
+We use this function to simulate 200 time points from the model:
+
+```{r}
+## Simulate 200 Time Points
+set.seed(1) # Make reproducible
+df <- SimMod1(N = 200, 
+              phi_Pos = 0.25, 
+              phi_Neg = 0.25, 
+              event_times_neg = c(40, 130)) # Timing of very negative events
+
+dim(df)
+head(df)
+```
+
+### Visualizing Data
+
+Here we visualize the time series of positive and negative affect we just simulated:
+
+```{r, fig.align="center"}
+Plot_TS <- function(df, 
+                    ylim=c(-6,10), 
+                    labels = c("Positive Affect", "Negative Affect")) {
+  plot.new()
+  plot.window(xlim=c(0, nrow(df)), ylim=ylim)
+  axis(1)
+  axis(2, las=2)
+  lines(df[, 1], col="darkgreen")
+  lines(df[, 2], col="tomato")
+  title(xlab="Time", ylab="Intensity")
+  legend("topright", legend=labels, 
+         text.col=c("darkgreen", "tomato"), bty="n")
+}
+Plot_TS(df)
+```
+
+We see that the negative and positive affect seem to be negatively correlated, as we would expect from our model. We also see the impact of the two very negative events on negative affect at time points 40 and 130.
+
+We now change $\phi_{Neg}$ from 0.25 to 0.90 to create the strong rumination effect we described above. We again simulate $N=200$ time points with these new settings:
+
+```{r}
+## Simulate 200 Time Points
+set.seed(1) # Make reproducible
+df2 <- SimMod1(N=200, 
+              phi_Pos=0.25, 
+              phi_Neg=0.90, 
+              event_times_neg = c(40, 130))
+```
+
+And make the same plot:
+
+```{r, fig.align="center"}
+Plot_TS(df2)
+```
+
+We see that negative affect lingers longer, as expected.
+
+### Fitting VAR Model
+
+We now fit a VAR model to the time series generated with $\phi_{Neg} = 0.90$ to see whether we are able to draw correct conclusions about the dynamics of the data generating mechanism.
+
+```{r}
+out_var <- EstimateVAR(as.matrix(df2), roundpoints = 2)
+out_var
+```
+
+Let's first interpret the lagged-effects parameters in the $\phi$ matrix, which are often plotted as a network:
+
+```{r, fig.align="center", fig.width=6, fig.height=2}
+qgraph(t(out_var$phi), labels=c("Pos", "Neg"), 
+       edge.labels=TRUE, layout=rbind(c(0,1),
+                                      c(1,1)),
+        mar=c(1,8,1,8), fade=FALSE)
+```
+
+We get an autocorrelation for positive affect of $0.23$, which is close to the true value of $0.25$. For negative affect we get an autocorrelation of $0.83$, which is also close to the true value of $0.90$.
+
+We also see that the cross-lagged effects are very small and negative. Without further inspecting the uncertainty of estimates we are not able to draw any conclusions about these parameters, because we don't have any sense for how much they are determined by sampling variability.
+
+Next we turn to `$psi`, the covariance matrix of the residuals. We see that the variance of the negative affect residuals is much larger. To compare the covariance to the covariance in the data generating model, we convert it to a correlation matrix:
+
+```{r}
+round(cov2cor(out_var$psi), 2)
+```
+
+We see that the correlation is is $-0.44$.
+
+Looking at the means, we see that they are $-0.05$ for positive affect and $1$ for negative affect.
+
+### Questions
+
+1.  Do you think the data generating model is a plausible model for ruminatiom? Why?
+2.  Does the VAR model accurately describe the dynamics of the model? Are there aspects that are captured well and others that are not?
+3.  What would be other ways to analyze the simulated data to recover the data generating dynamics?
+
+## Model 2: Emotion Generation
+
+We next consider a model of emotion generation.
+
+### Description of Dynamics
+
+The environment of the person consists of a number of discrete and mutually exclusive situations. Each situation elicits each emotion to a different degree. For example, a neutral situation does not elicit any emotion, while a negative situation elicits largely negative emotions, while the opposite is true for positive emotions.
+
+### Making the Model
+
+To implement these dynamics we have to make a number of choices:
+
+1.  We set the number of situations to five, with 1 neutral, 2 positive, and 2 negative situations
+2.  We set the number of emotions to six, with 3 positive and 3 negative emotions
+3.  The two positive situations cause slightly different combinations of positive emotions, and similarly the two negative situations cause slightly different combinations of negative emotions
+4.  To get a time series we need a mechanism to get from one situation to the next. This is done in a probabilistic way with a transition matrix, which determines, given that we are in state $S_i$ at time $t$, the probabilities of being in each of the five states at time $t+1$. We parameterize the transition probability matrix with only two parameters for the diagonal (staying) and off-diagonal (switching) entries, such that at a time scale of 1h there is a 60% chance of staying in the same situation. We consider this realistic for most people's average daily life.
+5.  We model the emotions elicited by each situation as a multivariate Gaussian distribution with a given mean vector and a diagonal covariance matrix.
+
+In more technical terms, this leads to a Markov model with five states associated with different multivariate Gaussian emission distributions over the six emotions. This is the model for emotion generation proposed by [Ryan, Dablander & Haslbeck (2024)](https://psycnet.apa.org/fulltext/2025-60391-001.html).
+
+```{r}
+
+## Set parameters
+Ns <- 5 # Number of states
+p <- 6 # Number of emission variables
+stay_prob <- .6
+switch_prob <- (1-stay_prob)/(Ns-1)
+
+# Means of emission distributions
+a <- 90
+b <- 60
+c <- 45
+means <- rbind(rep(0,p),
+               c(a, b, c,  0  ,  0  ,  0  ),
+               c(c, a, b,  0  ,  0  ,  0  ),
+               c( 0  ,  0  ,  0  , a, b, c),
+               c( 0  ,  0  ,  0  , c, a, b))
+
+## Simulate from Model
+N <- 300 # Number of time points
+
+# Storage
+df_m2 <- data.frame(matrix(NA, N, 7))
+colnames(df_m2) <- c("state", "happy", "relaxed", "satisfied", "sad", "anxious", "angry")
+
+# Reproducibility
+set.seed(2)
+
+# Initial State
+df_m2$state[1] <- 1
+df_m2[1, -1] <- mvrnorm(n=1, mu=means[df_m2$state[1], ], Sigma=(8^2)*diag(p))
+
+# Run Markov Model
+for(i in 2:N) {
+  # Draw State
+  prob_i <- rep(switch_prob, Ns)
+  prob_i[df_m2$state[i-1]] <- stay_prob
+  df_m2$state[i] <- sample(1:5, size=1, prob=prob_i)
+  # Draw Emissions
+  df_m2[i, -1] <- mvrnorm(n=1, mu=means[df_m2$state[i], ], Sigma=(10^2)*diag(p))
+} 
+
+dim(df_m2)
+round(head(df_m2), 2)
+
+```
+
+### Visualizing Data
+
+We first have a look at the correlations between the variables:
+
+```{r}
+round(cor(df_m2[, -1]), 2)
+```
+
+We see that variables within valence are largely positively correlated. We therefore, for now, only plot the one variable with each valence, namely Happy and Sad:
+
+```{r}
+Plot_TS(df_m2[, c("happy", "sad")], 
+        ylim=c(-30, 120), labels=c("Happy", "Sad"))
+```
+
+We can also have a look at the distribution, when collapsing the variables over time:
+
+```{r, fig.align="center", fig.width=8, fig.height=3}
+par(mfrow=c(1,2), mar=c(2,3,2,1))
+hist(df_m2[, c("happy")], col="darkgreen", 
+     breaks=seq(-50, 150, length=40), axes=FALSE, 
+     main="Happy", xlab="", font.main=1, ylim=c(0,40))
+axis(1)
+axis(2, las=2)
+hist(df_m2[, c("sad")], col="tomato", 
+     breaks=seq(-50, 150, length=40), axes=FALSE, 
+     main="Sad", xlab="", font.main=1, ylim=c(0,40))
+axis(1)
+axis(2, las=2)
+
+```
+
+### Fitting VAR Model
+
+We again anaylze this multivariate time series with a VAR model. Like in many research settings, we assume that we did not observe the events/situations but only the intensity of the six emotions.
+
+```{r}
+out_var_m2 <- EstimateVAR(as.matrix(df_m2[, -1]), roundpoints = 2)
+out_var_m2
+```
+
+We again visualize the lagged effects matrix as a network:
+
+```{r, fig.align="center", fig.width=6, fig.height=5}
+qgraph(t(out_var_m2$phi),
+       color = c(rep("darkgreen", 3), rep("tomato", 3)),
+       labels = colnames(df_m2)[-1], 
+       edge.labels=TRUE, layout = layout, 
+       fade=FALSE)
+```
+
+We see that autocorrelations are positive and larger than the cross-lagged effects, and we see largely positive cross-lagged effects between emotions with the same valence (e.g., Happy and Satisfied), and negative cross-lagged effects between emotions with a different valence (e.g., Angry and Happy). These four phenomena are typically observed in empirical emotion time series (see Table 1 [in this paper](https://psycnet.apa.org/fulltext/2025-60391-001.html)).
+
+### Questions
+
+1.  Do you think our generative model is a plausible model for emotion generation? Why?
+2.  Does the VAR model accurately describe the dynamics of the model? Are there aspects that are captured well and others that are not?
+3.  What would be other ways to analyze the simulated data to recover the data generating dynamics?
+
+## Bonus Model 3: Substance Abuse
+
+### Description of Dynamics
+
+Consuming substance increases pleasure, but the effect goes away again relatively quickly. At the same time, every time the resource is consumed, a resource variable is reduced by a tiny amount. The resource variable is defining the normal pleasure of the person. So, if the resource becomes lower, the overall pleasure of the person becomes lower. Finally, the probability of consuming the substance is larger when pleasure is low.
+
+This is an interesting model beyond the other two, because it involves a coupling between fast and slow changing variables.
+
+### Making the Model
+
+Maybe give it a try!
+
+```{r}
+# ...
+```
